@@ -1,0 +1,2 @@
+restapi : find users and class
+ldapsync : sync a samba/ldap PDC from claroline
