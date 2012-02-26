@@ -1,0 +1,203 @@
+<?php
+
+$claroserver="http://10.43.10.11/";
+$clarourl="pobrun/rest.users.php";
+$clarokey="theawesomekey";
+$teachergroup="enseignants";
+
+//we synchronise users
+$clarousers = getClarolineUser($claroserver,$clarourl,$clarokey);
+$ldapusers = getLDAPUsers();
+$realusers=array();
+$teachers=array();
+if(is_array($clarousers))
+{
+	foreach($clarousers as $user)
+	{
+		if($user["isCourseCreator"]==1)
+		{
+			$teachers[]=$user["username"];
+		}
+		$uid=$user["user_id"]+100000000;
+		$realusers[$uid]=$user["username"];
+		if(isset($ldapusers[$uid]))
+		{
+			if($user["username"]!=$ldapusers[$uid])
+			{
+				//we rename user
+				exec("sudo mv /home/".$ldapusers[$uid]." /home/".$user["username"]);					
+				exec('sudo smbldap-usermod -C "\\\\\\house\\'.$user["username"].'" -d /home/'.$user["username"].' -r '.$user["username"].' '.$ldapusers[$uid]);
+			}
+		}
+		else
+		{
+			//we create user
+			exec('sudo smbldap-useradd -E "allusers.bat" -C "\\\\\\house\\'.$user["username"].'" -u '.$uid.' -D "M:" -A0 -B0 -m -a '.$user["username"]);
+		}
+		//we update password
+		exec('sudo /root/./smbldap-passwd.pob.sh '.$user["username"].' '.$user["password"]);
+	}
+
+	
+	$ldapusers = getLDAPUsers();
+	$deleted = array_diff($ldapusers, $realusers);
+	foreach($deleted as $duser)
+	{
+		$deldir="/home/deleted/".date("Y-m-d-H.i.s");
+		mkdir($deldir);
+		exec("sudo mv /home/".$duser." ".$deldir."/".$duser);	
+		exec('sudo smbldap-userdel '.$duser);
+	}
+//we synchronise teacher
+	$ldapteachers = getLDAPUsersFromGroup($teachergroup);
+	$oldteachers = array_diff($ldapteachers, $teachers);
+	foreach($oldteachers as $dteacher)
+	{
+		exec('sudo smbldap-groupmod -x '.$dteacher.' '.$teachergroup);
+	}
+	$ldapteachers = getLDAPUsersFromGroup($teachergroup);
+	$newteachers = array_diff($teachers,$ldapteachers);
+	foreach($newteachers as $nteacher)
+	{
+		exec('sudo smbldap-groupmod -m '.$nteacher.' '.$teachergroup);
+	}
+	
+	
+//we synchronise class
+	$claroclass = getClarolineClass($claroserver,$clarourl,$clarokey);
+	$ldapclass = getLDAPGroups();
+	if(is_array($claroclass))
+	{
+		$realclass=array();
+		foreach($claroclass as $class)
+		{
+			$gid=$class["id"]+100000000;
+			$realclass[$gid]=$class["name"];
+			if(isset($ldapclass[$gid]))
+			{
+				if($class["name"]!=$ldapclass[$gid])
+				{
+					//we rename the class
+					exec('sudo smbldap-groupmod -n '.$class["name"].' '.$ldapclass[$gid]);
+				}
+			}
+			else
+			{
+				//we create the class
+				exec('sudo smbldap-groupadd -g '.$gid.' -a '.$class["name"]);
+			}
+			
+			$claroclassusers = getClarolineUsersFromCLass($claroserver,$clarourl,$clarokey,$class["id"]);
+			$ldapclassusers = getLDAPUsersFromGroup($class["name"]);
+			if(is_array($claroclassusers))
+			{
+
+				$realclassusers=array();
+				foreach($claroclassusers as $classuser)
+				{
+					$realclassusers[]=$classuser["username"];
+					exec('sudo smbldap-groupmod -m '.$classuser["username"].' '.$class["name"]);
+				}
+				//we remove from the group the users removed in claroline
+				
+				$ldapclassusers = getLDAPUsersFromGroup($class["name"]);
+				$classuserdeleted = array_diff($ldapclassusers, $realclassusers);
+				foreach($classuserdeleted as $dclassuser)
+				{
+					exec('sudo smbldap-groupmod -x '.$dclassuser.' '.$class["name"]);
+				}
+			}
+		}
+		//we remove from the class deleted in claroline
+		$ldapclass = getLDAPGroups();
+		$classdeleted = array_diff($ldapclass, $realclass);
+		foreach($classdeleted as $dclass)
+		{
+			exec('sudo smbldap-groupdel '.$dclass);
+		}
+	}
+}
+
+exec('sudo sudo auth-client-config -t nss -p lac_ldap');
+
+function getClarolineUser($_server,$_url,$_key)
+{
+	return json_decode(getByCurl($_url."?action=getusers&key=".$_key,$_server),1);
+}
+
+function getClarolineClass($_server,$_url,$_key)
+{
+	return json_decode(getByCurl($_url."?action=getclass&key=".$_key,$_server),1);
+}
+
+function getClarolineUsersFromCLass($_server,$_url,$_key,$_class)
+{
+	return json_decode(getByCurl($_url."?action=getusersfromclass&class=".$_class."&key=".$_key,$_server),1);
+}
+
+function getLDAPUsers()
+{
+        $ret = shell_exec('smbldap-userlist');
+        $ret=str_replace(" ","",$ret);
+        $ret=str_getcsv($ret,"\n");
+        $list=array();
+        foreach($ret as $line)
+        {
+                $exline=str_getcsv($line,"|");
+                if($exline[0]>100000000)
+                {
+                        $list[$exline[0]]=$exline[1];
+                }
+        }
+        return $list;
+}
+
+function getLDAPGroups()
+{
+	$ret = shell_exec('/root/./smbldap-grouplist.pl');
+        $ret=str_replace(" ","",$ret);
+        $ret=str_getcsv($ret,"\n");
+        $list=array();
+        foreach($ret as $line)
+        {
+                $exline=str_getcsv($line,"|");
+                if($exline[0]>100000000)
+                {
+                        $list[$exline[0]]=$exline[1];
+                }
+        }
+        return $list;
+        
+}
+
+function getLDAPUsersFromGroup($_groupname)
+{
+	$ret = shell_exec('smbldap-groupshow '.$_groupname);
+        $ret=str_replace(" ","",$ret);
+        $ret=str_getcsv($ret,"\n");
+        $list=array();
+        foreach($ret as $line)
+        {
+                $exline=str_getcsv($line,":");
+                if($exline[0]=="memberUid")
+                {
+			$list=explode(",",trim($exline[1]));
+                }
+        }
+        return $list;
+}
+
+function getByCurl($_uri,$_server)
+{
+	$c = curl_init($_server.$_uri);
+	curl_setopt($c, CURLOPT_RETURNTRANSFER, 1);
+ 	if (strpos($_server, 'https://') === 0) {
+        curl_setopt($c, CURLOPT_SSL_VERIFYPEER, FALSE);
+    }
+	$ret = curl_exec($c);
+	curl_close($c);
+	return $ret;
+}
+
+?>
+
